@@ -1,9 +1,14 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   LayoutDashboard, ListChecks, History, BarChart3, Users, LogOut,
   Menu, X, Coffee, Check, XCircle, AlertTriangle, Clock, Lock, User as UserIcon,
   Play, Square, ChevronRight, ShieldCheck, RefreshCw
 } from "lucide-react";
+import {
+  ADMIN_ID, fetchEmployees, fetchRequests,
+  hashPassword, initializeData, insertEmployee, insertRequest, loadSession,
+  saveSession, updateEmployee, updateRequest, deleteEmployee as deleteEmployeeInDb,
+} from "./supabase";
 
 // ---------------------------------------------------------------------------
 // Design tokens
@@ -29,58 +34,6 @@ const C = {
 
 const FONT_UI = "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
 const FONT_MONO = "'JetBrains Mono', 'SF Mono', Consolas, monospace";
-
-// ---------------------------------------------------------------------------
-// Storage helpers
-// ---------------------------------------------------------------------------
-const EMP_KEY = "ebms:employees";
-const REQ_KEY = "ebms:requests";
-const SESSION_KEY = "ebms:session";
-const ADMIN_ID = "admin_001";
-const ADMIN_NAME = "Mohamed Hatem";
-const ADMIN_PASSWORD = "Mohamed642002";
-
-// NOTE: This app was originally built against Claude.ai's artifact-only
-// `window.storage` API, which does not exist outside claude.ai. These
-// helpers reimplement the same async get/set contract on top of the
-// browser's localStorage so the app works as a normal deployed website.
-//
-// Caveat: localStorage is per-browser/per-device, so "shared" data here
-// is only shared across tabs on the same browser, not across different
-// employees' devices in real life. For real multi-device sync (e.g. an
-// employee requesting a break on their phone and an admin approving it
-// on a different computer) you'll need a real backend/database — see
-// the README for suggestions (Firebase, Supabase, etc).
-async function loadShared(key, fallback) {
-  try {
-    const raw = window.localStorage.getItem(key);
-    if (raw === null) return fallback;
-    return JSON.parse(raw);
-  } catch (e) {
-    return fallback;
-  }
-}
-
-async function saveShared(key, value) {
-  try {
-    window.localStorage.setItem(key, JSON.stringify(value));
-  } catch (e) {
-    console.error("storage set failed", key, e);
-  }
-}
-
-async function hashPassword(pw) {
-  try {
-    const enc = new TextEncoder().encode(pw);
-    const buf = await crypto.subtle.digest("SHA-256", enc);
-    return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
-  } catch (e) {
-    // Fallback simple hash if subtle crypto unavailable
-    let h = 0;
-    for (let i = 0; i < pw.length; i++) { h = (h * 31 + pw.charCodeAt(i)) | 0; }
-    return "fb" + h.toString(16);
-  }
-}
 
 function uid(prefix) {
   return prefix + "_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -224,6 +177,7 @@ export default function BreakManagementApp() {
   const [view, setView] = useState("dashboard");
   const [now, setNow] = useState(Date.now());
   const [toast, setToast] = useState(null);
+  const [dataError, setDataError] = useState("");
 
   const requestsRef = useRef(requests);
   requestsRef.current = requests;
@@ -231,53 +185,40 @@ export default function BreakManagementApp() {
   // ---- initial load + seed admin -----------------------------------------
   useEffect(() => {
     (async () => {
-      let emps = await loadShared(EMP_KEY, null);
-      if (!emps) {
-        const adminHash = await hashPassword(ADMIN_PASSWORD);
-        emps = [{ id: ADMIN_ID, name: ADMIN_NAME, passwordHash: adminHash, role: "admin", createdAt: Date.now() }];
-        await saveShared(EMP_KEY, emps);
-      } else {
-        const adminHash = await hashPassword(ADMIN_PASSWORD);
-        const adminIndex = emps.findIndex((emp) => emp.id === ADMIN_ID || emp.role === "admin");
-        if (adminIndex === -1) {
-          emps = [{ id: ADMIN_ID, name: ADMIN_NAME, passwordHash: adminHash, role: "admin", createdAt: Date.now() }, ...emps];
-          await saveShared(EMP_KEY, emps);
-        } else if (
-          emps[adminIndex].name !== ADMIN_NAME ||
-          emps[adminIndex].passwordHash !== adminHash ||
-          emps[adminIndex].role !== "admin"
-        ) {
-          emps = emps.map((emp, index) => index === adminIndex
-            ? { ...emp, id: ADMIN_ID, name: ADMIN_NAME, passwordHash: adminHash, role: "admin" }
-            : emp
-          );
-          await saveShared(EMP_KEY, emps);
+      try {
+        const data = await initializeData();
+        setEmployees(data.employees);
+        setRequests(data.requests);
+        const savedSession = loadSession();
+        if (savedSession?.id) {
+          const savedEmployee = data.employees.find((emp) => emp.id === savedSession.id);
+          if (savedEmployee) {
+            setCurrentUser({ id: savedEmployee.id, name: savedEmployee.name, role: savedEmployee.role });
+            setView(savedEmployee.role === "employee" ? "dashboard" : "overview");
+          } else {
+            saveSession(null);
+          }
         }
+      } catch (error) {
+        setDataError(error.message);
+        setAuthError(error.message);
+      } finally {
+        setReady(true);
       }
-      const reqs = await loadShared(REQ_KEY, []);
-      setEmployees(emps);
-      setRequests(reqs);
-      const savedSession = await loadShared(SESSION_KEY, null);
-      if (savedSession?.id) {
-        const savedEmployee = emps.find((emp) => emp.id === savedSession.id);
-        if (savedEmployee) {
-          setCurrentUser({ id: savedEmployee.id, name: savedEmployee.name, role: savedEmployee.role });
-          setView(savedEmployee.role === "employee" ? "dashboard" : "overview");
-        } else {
-          await saveShared(SESSION_KEY, null);
-        }
-      }
-      setReady(true);
     })();
   }, []);
 
   // ---- polling refresh (simulates real-time / multi-device sync) --------
   useEffect(() => {
     const poll = setInterval(async () => {
-      const emps = await loadShared(EMP_KEY, null);
-      const reqs = await loadShared(REQ_KEY, null);
-      if (emps) setEmployees(emps);
-      if (reqs) setRequests(reqs);
+      try {
+        const [emps, reqs] = await Promise.all([fetchEmployees(), fetchRequests()]);
+        setEmployees(emps);
+        setRequests(reqs);
+        setDataError("");
+      } catch (error) {
+        setDataError(error.message);
+      }
     }, 3500);
     return () => clearInterval(poll);
   }, []);
@@ -294,15 +235,10 @@ export default function BreakManagementApp() {
     return () => clearTimeout(t);
   }, [toast]);
 
-  const persistRequests = useCallback(async (next) => {
-    setRequests(next);
-    await saveShared(REQ_KEY, next);
-  }, []);
-
-  const persistEmployees = useCallback(async (next) => {
-    setEmployees(next);
-    await saveShared(EMP_KEY, next);
-  }, []);
+  function showDataError(error) {
+    setDataError(error.message);
+    setToast({ tone: "alert", text: error.message });
+  }
 
   // ---- auth actions --------------------------------------------------------
   async function handleRegister(name, password) {
@@ -314,10 +250,16 @@ export default function BreakManagementApp() {
     }
     const passwordHash = await hashPassword(password);
     const emp = { id: uid("emp"), name, passwordHash, role: "employee", createdAt: Date.now() };
-    const next = [...employees, emp];
-    await persistEmployees(next);
+    try {
+      const savedEmployee = await insertEmployee(emp);
+      setEmployees((current) => [...current, savedEmployee]);
+    } catch (error) {
+      showDataError(error);
+      setAuthError(error.message);
+      return;
+    }
     const session = { id: emp.id, name: emp.name, role: "employee" };
-    await saveShared(SESSION_KEY, session);
+    saveSession(session);
     setCurrentUser(session);
     setView("dashboard");
   }
@@ -329,13 +271,13 @@ export default function BreakManagementApp() {
     const hash = await hashPassword(password);
     if (hash !== emp.passwordHash) { setAuthError("Incorrect password."); return; }
     const session = { id: emp.id, name: emp.name, role: emp.role };
-    await saveShared(SESSION_KEY, session);
+    saveSession(session);
     setCurrentUser(session);
     setView(emp.role === "employee" ? "dashboard" : "overview");
   }
 
   async function handleLogout() {
-    await saveShared(SESSION_KEY, null);
+    saveSession(null);
     setCurrentUser(null);
     setAuthMode("login");
   }
@@ -349,48 +291,84 @@ export default function BreakManagementApp() {
       approvedBy: null, approvalTime: null, breakStartTime: null, breakEndTime: null,
       actualDuration: null, overtimeDuration: null, acknowledged: false,
     };
-    await persistRequests([...requestsRef.current, req]);
+    try {
+      const savedRequest = await insertRequest(req);
+      setRequests((current) => [...current, savedRequest]);
+    } catch (error) {
+      showDataError(error);
+      return;
+    }
     setToast({ tone: "accent", text: `Break request sent — ${minutes} min` });
   }
 
   async function approveRequest(reqId) {
     const nowTs = Date.now();
-    const next = requestsRef.current.map((r) =>
-      r.id === reqId ? { ...r, status: "approved", approvedBy: currentUser.name, approvalTime: nowTs, breakStartTime: nowTs } : r
-    );
-    await persistRequests(next);
+    const existing = requestsRef.current.find((request) => request.id === reqId);
+    if (!existing) return;
+    const changes = { ...existing, status: "approved", approvedBy: currentUser.name, approvalTime: nowTs, breakStartTime: nowTs };
+    try {
+      const savedRequest = await updateRequest(reqId, changes);
+      setRequests((current) => current.map((request) => request.id === reqId ? savedRequest : request));
+    } catch (error) {
+      showDataError(error);
+      return;
+    }
     setToast({ tone: "ok", text: "Break approved" });
   }
 
   async function rejectRequest(reqId) {
-    const next = requestsRef.current.map((r) =>
-      r.id === reqId ? { ...r, status: "rejected" } : r
-    );
-    await persistRequests(next);
+    const existing = requestsRef.current.find((request) => request.id === reqId);
+    if (!existing) return;
+    try {
+      const savedRequest = await updateRequest(reqId, { ...existing, status: "rejected" });
+      setRequests((current) => current.map((request) => request.id === reqId ? savedRequest : request));
+    } catch (error) {
+      showDataError(error);
+      return;
+    }
     setToast({ tone: "alert", text: "Break rejected" });
   }
 
   async function acknowledgeRejection(reqId) {
-    const next = requestsRef.current.map((r) => (r.id === reqId ? { ...r, acknowledged: true } : r));
-    await persistRequests(next);
+    const existing = requestsRef.current.find((request) => request.id === reqId);
+    if (!existing) return;
+    try {
+      const savedRequest = await updateRequest(reqId, { ...existing, acknowledged: true });
+      setRequests((current) => current.map((request) => request.id === reqId ? savedRequest : request));
+    } catch (error) {
+      showDataError(error);
+    }
   }
 
   async function endBreak(reqId) {
     const nowTs = Date.now();
-    const next = requestsRef.current.map((r) => {
-      if (r.id !== reqId) return r;
-      const actual = minutesBetween(r.breakStartTime, nowTs);
-      const overtime = Math.max(0, actual - r.requestedMinutes);
-      return { ...r, status: "completed", breakEndTime: nowTs, actualDuration: actual, overtimeDuration: overtime };
-    });
-    await persistRequests(next);
+    const existing = requestsRef.current.find((request) => request.id === reqId);
+    if (!existing) return;
+    const actual = minutesBetween(existing.breakStartTime, nowTs);
+    const overtime = Math.max(0, actual - existing.requestedMinutes);
+    try {
+      const savedRequest = await updateRequest(reqId, {
+        ...existing, status: "completed", breakEndTime: nowTs, actualDuration: actual, overtimeDuration: overtime,
+      });
+      setRequests((current) => current.map((request) => request.id === reqId ? savedRequest : request));
+    } catch (error) {
+      showDataError(error);
+      return;
+    }
     setToast({ tone: "ok", text: "Break ended — logged to history" });
   }
 
   async function updateEmployeeRole(employeeId, role) {
     if (currentUser.role !== "admin" || employeeId === ADMIN_ID) return;
-    const next = employees.map((employee) => employee.id === employeeId ? { ...employee, role } : employee);
-    await persistEmployees(next);
+    const existing = employees.find((employee) => employee.id === employeeId);
+    if (!existing) return;
+    try {
+      const savedEmployee = await updateEmployee(employeeId, { ...existing, role });
+      setEmployees((current) => current.map((employee) => employee.id === employeeId ? savedEmployee : employee));
+    } catch (error) {
+      showDataError(error);
+      return;
+    }
     setToast({ tone: "ok", text: role === "supervisor" ? "Supervisor access granted" : "Employee access restored" });
   }
 
@@ -399,8 +377,14 @@ export default function BreakManagementApp() {
     const employee = employees.find((item) => item.id === employeeId);
     if (!employee) return;
     if (!window.confirm(`Delete ${employee.name}'s account and break history?`)) return;
-    await persistEmployees(employees.filter((item) => item.id !== employeeId));
-    await persistRequests(requestsRef.current.filter((request) => request.employeeId !== employeeId));
+    try {
+      await deleteEmployeeInDb(employeeId);
+      setEmployees((current) => current.filter((item) => item.id !== employeeId));
+      setRequests((current) => current.filter((request) => request.employeeId !== employeeId));
+    } catch (error) {
+      showDataError(error);
+      return;
+    }
     setToast({ tone: "alert", text: `${employee.name}'s account was deleted` });
   }
 
@@ -523,6 +507,11 @@ export default function BreakManagementApp() {
 
         {/* Content */}
         <div style={{ padding: 24, flex: 1, overflow: "auto" }}>
+          {dataError && (
+            <div style={{ background: C.alertDim, color: C.alert, fontSize: 12.5, padding: "9px 12px", borderRadius: 6, marginBottom: 16, display: "flex", alignItems: "center", gap: 7 }}>
+              <AlertTriangle size={14} /> {dataError}
+            </div>
+          )}
           {currentUser.role === "employee" && view === "dashboard" && (
             <EmployeeDashboard
               user={currentUser} activeReq={myActive} now={now} onRequestBreak={requestBreak}
