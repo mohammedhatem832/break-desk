@@ -11,8 +11,10 @@ breakdesk/
 ├── .github/workflows/deploy.yml   # auto-deploys to GitHub Pages on push to main
 ├── src/
 │   ├── App.jsx                    # the whole app (auth, dashboard, admin views)
+│   ├── supabase.js                # Supabase client, data access, and migration
 │   ├── main.jsx                   # React entry point
 │   └── index.css                  # global styles / font import
+├── supabase/schema.sql             # tables and browser policies used by the app
 ├── index.html                     # Vite HTML entry point
 ├── package.json
 ├── vite.config.js
@@ -39,6 +41,20 @@ npm run preview   # optional: preview the production build locally
 
 The static site is output to `dist/`.
 
+## Supabase setup
+
+Run `supabase/schema.sql` in the Supabase SQL editor before opening the app.
+The browser client reads `VITE_SUPABASE_URL` and
+`VITE_SUPABASE_PUBLISHABLE_KEY` when supplied; the configured project values
+are safe browser fallbacks for GitHub Pages. Never put a `service_role` key in
+this repository or in a Vite environment variable.
+
+On its first load, the app inserts the `Mohamed Hatem` /
+`Mohamed642002` admin account if absent and migrates legacy
+`ebms:employees` and `ebms:requests` localStorage arrays once. Only the login
+session remains in localStorage afterward; shared employees and requests are
+loaded from Supabase and refreshed periodically for other devices.
+
 ## Deploying to GitHub Pages
 
 This repo includes a ready-made GitHub Actions workflow (`.github/workflows/deploy.yml`) that builds and deploys the site automatically on every push to `main`.
@@ -55,28 +71,17 @@ The build output in `dist/` is a plain static site, so it also works as-is on Ne
 
 On first run the app seeds one admin account:
 
-- **Name:** `admin`
-- **Password:** `admin123`
-
-Change or remove this before using the app for real — see "Data & security notes" below.
+- **Name:** `Mohamed Hatem`
+- **Password:** `Mohamed642002`
 
 ## Data & security notes
 
-This app was adapted from a Claude.ai artifact that used Claude's built-in `window.storage` API. That API only exists inside claude.ai, so it's been replaced with the browser's `localStorage` (see `loadShared`/`saveShared` in `src/App.jsx`) so the app runs as a normal website.
-
-**Important limitation:** `localStorage` is scoped to one browser on one device. That means:
-
-- Two people using the app on *different* devices/browsers will **not** see each other's data — an admin on a laptop won't see a break request an employee submitted on their phone.
-- Everything (including password hashes) lives in the visitor's own browser, unencrypted at rest.
-
-This is fine for a demo, a kiosk-style single shared computer, or local testing. For real multi-user, multi-device use you'll want to swap `loadShared`/`saveShared` for a real backend, e.g.:
-
-- [Supabase](https://supabase.com/) or [Firebase](https://firebase.google.com/) (managed database + auth, generous free tiers, minimal setup)
-- Your own small API (Node/Express, etc.) backed by Postgres/SQLite
-
-Because both helper functions are already `async` and centralized in one place near the top of `src/App.jsx`, swapping in a real backend later is a matter of rewriting those two functions — the rest of the app doesn't need to change.
-
-Also note passwords are hashed with SHA-256 client-side with no salt — adequate for keeping honest people out, not a substitute for a real auth system if this is used outside a trusted team.
+Employees and break requests are shared through Supabase. The existing custom
+login is intentionally preserved, including its SHA-256 client-side password
+hashing and local session persistence. This is suitable for the current trusted
+team workflow, but it is not a replacement for Supabase Auth: for a
+security-sensitive deployment, use a proper authenticated backend and tighter
+row-level policies than the anonymous policies in `supabase/schema.sql`.
 
 ## License
 
