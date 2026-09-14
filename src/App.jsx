@@ -36,6 +36,9 @@ const FONT_MONO = "'JetBrains Mono', 'SF Mono', Consolas, monospace";
 const EMP_KEY = "ebms:employees";
 const REQ_KEY = "ebms:requests";
 const SESSION_KEY = "ebms:session";
+const ADMIN_ID = "admin_001";
+const ADMIN_NAME = "Mohamed Hatem";
+const ADMIN_PASSWORD = "Mohamed642002";
 
 // NOTE: This app was originally built against Claude.ai's artifact-only
 // `window.storage` API, which does not exist outside claude.ai. These
@@ -230,9 +233,26 @@ export default function BreakManagementApp() {
     (async () => {
       let emps = await loadShared(EMP_KEY, null);
       if (!emps) {
-        const adminHash = await hashPassword("admin123");
-        emps = [{ id: "admin_001", name: "admin", passwordHash: adminHash, role: "admin", createdAt: Date.now() }];
+        const adminHash = await hashPassword(ADMIN_PASSWORD);
+        emps = [{ id: ADMIN_ID, name: ADMIN_NAME, passwordHash: adminHash, role: "admin", createdAt: Date.now() }];
         await saveShared(EMP_KEY, emps);
+      } else {
+        const adminHash = await hashPassword(ADMIN_PASSWORD);
+        const adminIndex = emps.findIndex((emp) => emp.id === ADMIN_ID || emp.role === "admin");
+        if (adminIndex === -1) {
+          emps = [{ id: ADMIN_ID, name: ADMIN_NAME, passwordHash: adminHash, role: "admin", createdAt: Date.now() }, ...emps];
+          await saveShared(EMP_KEY, emps);
+        } else if (
+          emps[adminIndex].name !== ADMIN_NAME ||
+          emps[adminIndex].passwordHash !== adminHash ||
+          emps[adminIndex].role !== "admin"
+        ) {
+          emps = emps.map((emp, index) => index === adminIndex
+            ? { ...emp, id: ADMIN_ID, name: ADMIN_NAME, passwordHash: adminHash, role: "admin" }
+            : emp
+          );
+          await saveShared(EMP_KEY, emps);
+        }
       }
       const reqs = await loadShared(REQ_KEY, []);
       setEmployees(emps);
@@ -242,7 +262,7 @@ export default function BreakManagementApp() {
         const savedEmployee = emps.find((emp) => emp.id === savedSession.id);
         if (savedEmployee) {
           setCurrentUser({ id: savedEmployee.id, name: savedEmployee.name, role: savedEmployee.role });
-          setView(savedEmployee.role === "admin" ? "overview" : "dashboard");
+          setView(savedEmployee.role === "employee" ? "dashboard" : "overview");
         } else {
           await saveShared(SESSION_KEY, null);
         }
@@ -311,7 +331,7 @@ export default function BreakManagementApp() {
     const session = { id: emp.id, name: emp.name, role: emp.role };
     await saveShared(SESSION_KEY, session);
     setCurrentUser(session);
-    setView(emp.role === "admin" ? "overview" : "dashboard");
+    setView(emp.role === "employee" ? "dashboard" : "overview");
   }
 
   async function handleLogout() {
@@ -367,6 +387,23 @@ export default function BreakManagementApp() {
     setToast({ tone: "ok", text: "Break ended — logged to history" });
   }
 
+  async function updateEmployeeRole(employeeId, role) {
+    if (currentUser.role !== "admin" || employeeId === ADMIN_ID) return;
+    const next = employees.map((employee) => employee.id === employeeId ? { ...employee, role } : employee);
+    await persistEmployees(next);
+    setToast({ tone: "ok", text: role === "supervisor" ? "Supervisor access granted" : "Employee access restored" });
+  }
+
+  async function deleteEmployee(employeeId) {
+    if (currentUser.role !== "admin" || employeeId === ADMIN_ID) return;
+    const employee = employees.find((item) => item.id === employeeId);
+    if (!employee) return;
+    if (!window.confirm(`Delete ${employee.name}'s account and break history?`)) return;
+    await persistEmployees(employees.filter((item) => item.id !== employeeId));
+    await persistRequests(requestsRef.current.filter((request) => request.employeeId !== employeeId));
+    setToast({ tone: "alert", text: `${employee.name}'s account was deleted` });
+  }
+
   // -------------------------------------------------------------------------
   if (!ready) {
     return (
@@ -389,12 +426,13 @@ export default function BreakManagementApp() {
   const myActive = myRequests.find((r) => r.status === "waiting" || r.status === "approved");
   const myLatestRejected = [...myRequests].reverse().find((r) => r.status === "rejected" && !r.acknowledged);
 
-  const navItems = currentUser.role === "admin"
+  const isManager = currentUser.role === "admin" || currentUser.role === "supervisor";
+  const navItems = isManager
     ? [
         { id: "overview", label: "Overview", icon: LayoutDashboard },
         { id: "waiting", label: "Waiting List", icon: ListChecks },
         { id: "active", label: "Active Breaks", icon: Coffee },
-        { id: "employees", label: "Employees", icon: Users },
+        ...(currentUser.role === "admin" ? [{ id: "employees", label: "Employees", icon: Users }] : []),
         { id: "stats30", label: "30-Day Stats", icon: BarChart3 },
       ]
     : [
@@ -438,12 +476,12 @@ export default function BreakManagementApp() {
                 key={item.id}
                 onClick={() => setView(item.id)}
                 style={{
-                  display: "flex", alignItems: "center", gap: 11, padding: "10px 12px", borderRadius: 8,
+                  display: "flex", alignItems: "center", gap: 14, padding: "12px 12px", borderRadius: 8,
                   cursor: "pointer", marginBottom: 3, color: active ? C.text : C.textMuted,
                   background: active ? C.panelAlt : "transparent", fontSize: 13.5, fontWeight: active ? 600 : 500,
                 }}
               >
-                <item.icon size={16} color={active ? C.accent : C.textFaint} style={{ flexShrink: 0 }} />
+                    <item.icon size={21} strokeWidth={2.2} color={active ? C.accent : C.textFaint} style={{ flexShrink: 0 }} />
                 {sidebarOpen && <span>{item.label}</span>}
                 {active && sidebarOpen && <ChevronRight size={13} style={{ marginLeft: "auto" }} color={C.textFaint} />}
               </div>
@@ -456,7 +494,7 @@ export default function BreakManagementApp() {
             onClick={handleLogout}
             style={{ display: "flex", alignItems: "center", gap: 11, padding: "10px 12px", borderRadius: 8, cursor: "pointer", color: C.textMuted, fontSize: 13.5, fontWeight: 500 }}
           >
-            <LogOut size={16} color={C.textFaint} />
+            <LogOut size={20} strokeWidth={2.2} color={C.textFaint} />
             {sidebarOpen && <span>Log out</span>}
           </div>
         </div>
@@ -468,7 +506,7 @@ export default function BreakManagementApp() {
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 24px", borderBottom: `1px solid ${C.border}` }}>
           <div>
             <div style={{ fontSize: 16, fontWeight: 700 }}>
-              {currentUser.role === "admin" ? "Admin control room" : `Hi, ${currentUser.name}`}
+              {isManager ? `${currentUser.role === "admin" ? "Admin" : "Supervisor"} control room` : `Hi, ${currentUser.name}`}
             </div>
             <div style={{ fontSize: 12.5, color: C.textMuted, marginTop: 2 }}>{fmtDate(new Date(now))}</div>
           </div>
@@ -476,9 +514,9 @@ export default function BreakManagementApp() {
             <div style={{ fontFamily: FONT_MONO, fontSize: 15, color: C.textMuted, fontVariantNumeric: "tabular-nums" }}>
               {fmtClock(new Date(now))}
             </div>
-            <Badge tone={currentUser.role === "admin" ? "accent" : "muted"}>
-              {currentUser.role === "admin" ? <ShieldCheck size={12} /> : <UserIcon size={12} />}
-              {currentUser.role === "admin" ? "Admin" : "Employee"}
+            <Badge tone={isManager ? "accent" : "muted"}>
+              {isManager ? <ShieldCheck size={12} /> : <UserIcon size={12} />}
+              {currentUser.role === "admin" ? "Admin" : currentUser.role === "supervisor" ? "Supervisor" : "Employee"}
             </Badge>
           </div>
         </div>
@@ -495,19 +533,19 @@ export default function BreakManagementApp() {
           {currentUser.role === "employee" && view === "history" && (
             <EmployeeHistory myRequests={myRequests} />
           )}
-          {currentUser.role === "admin" && view === "overview" && (
-            <AdminOverview requests={requests} employees={employees} now={now} onApprove={approveRequest} onReject={rejectRequest} />
+          {isManager && view === "overview" && (
+            <AdminOverview requests={requests} employees={employees} now={now} onApprove={approveRequest} onReject={rejectRequest} onEndBreak={endBreak} />
           )}
-          {currentUser.role === "admin" && view === "waiting" && (
+          {isManager && view === "waiting" && (
             <AdminWaitingList requests={requests} now={now} onApprove={approveRequest} onReject={rejectRequest} />
           )}
-          {currentUser.role === "admin" && view === "active" && (
-            <AdminActiveBreaks requests={requests} now={now} />
+          {isManager && view === "active" && (
+            <AdminActiveBreaks requests={requests} now={now} onEndBreak={endBreak} />
           )}
           {currentUser.role === "admin" && view === "employees" && (
-            <AdminEmployees employees={employees} requests={requests} now={now} />
+            <AdminEmployees employees={employees} requests={requests} now={now} onRoleChange={updateEmployeeRole} onDelete={deleteEmployee} />
           )}
-          {currentUser.role === "admin" && view === "stats30" && (
+          {isManager && view === "stats30" && (
             <Admin30Day employees={employees} requests={requests} />
           )}
         </div>
@@ -590,8 +628,8 @@ function AuthScreen({ mode, setMode, onLogin, onRegister, error, clearError }) {
           </form>
 
           <div style={{ marginTop: 16, fontSize: 11.5, color: C.textFaint, lineHeight: 1.5 }}>
-            Admin access: sign in with name <span style={{ color: C.textMuted, fontFamily: FONT_MONO }}>admin</span> and password{" "}
-            <span style={{ color: C.textMuted, fontFamily: FONT_MONO }}>admin123</span>.
+            Admin access: sign in with name <span style={{ color: C.textMuted, fontFamily: FONT_MONO }}>Mohamed Hatem</span> and password{" "}
+            <span style={{ color: C.textMuted, fontFamily: FONT_MONO }}>Mohamed642002</span>.
           </div>
         </Card>
       </div>
@@ -807,7 +845,7 @@ function groupByDay(completedRequests, dayTimestamps) {
 // ---------------------------------------------------------------------------
 // Admin: Overview
 // ---------------------------------------------------------------------------
-function AdminOverview({ requests, employees, now, onApprove, onReject }) {
+function AdminOverview({ requests, employees, now, onApprove, onReject, onEndBreak }) {
   const waiting = requests.filter((r) => r.status === "waiting");
   const active = requests.filter((r) => r.status === "approved");
   const overtimeCount = active.filter((r) => computeTimer(r, now)?.phase === "overtime").length;
@@ -823,7 +861,7 @@ function AdminOverview({ requests, employees, now, onApprove, onReject }) {
       </div>
 
       <SectionTitle title="Active breaks" sub="Live view of who's on break right now" />
-      <ActiveBreaksTable requests={active} now={now} style={{ marginBottom: 24 }} />
+      <ActiveBreaksTable requests={active} now={now} onEndBreak={onEndBreak} style={{ marginBottom: 24 }} />
 
       <SectionTitle title="Break requests" sub="Approve or reject without leaving this page" />
       <WaitingTable requests={waiting} onApprove={onApprove} onReject={onReject} />
@@ -874,28 +912,28 @@ function WaitingTable({ requests, onApprove, onReject }) {
   );
 }
 
-function AdminActiveBreaks({ requests, now }) {
+function AdminActiveBreaks({ requests, now, onEndBreak }) {
   const active = requests.filter((r) => r.status === "approved");
   return (
     <div>
       <SectionTitle title="Active breaks" sub="Remaining time and overtime, calculated from the stored start time" />
-      <ActiveBreaksTable requests={active} now={now} />
+      <ActiveBreaksTable requests={active} now={now} onEndBreak={onEndBreak} />
     </div>
   );
 }
 
-function ActiveBreaksTable({ requests, now, style }) {
+function ActiveBreaksTable({ requests, now, onEndBreak, style }) {
   return (
     <Card style={{ padding: 0, overflow: "hidden", ...style }}>
       <table>
         <thead>
           <tr style={{ borderBottom: `1px solid ${C.border}`, color: C.textMuted }}>
-            <th>Employee</th><th>Break</th><th>Remaining</th><th>Overtime</th>
+            <th>Employee</th><th>Break</th><th>Remaining</th><th>Overtime</th><th>Control</th>
           </tr>
         </thead>
         <tbody>
           {requests.length === 0 && (
-            <tr><td colSpan={4} style={{ color: C.textFaint, padding: 18 }}>Nobody is on break right now.</td></tr>
+            <tr><td colSpan={5} style={{ color: C.textFaint, padding: 18 }}>Nobody is on break right now.</td></tr>
           )}
           {requests.map((r) => {
             const t = computeTimer(r, now);
@@ -909,6 +947,11 @@ function ActiveBreaksTable({ requests, now, style }) {
                 <td style={{ fontFamily: FONT_MONO, color: t.phase === "overtime" ? C.alert : C.textFaint }}>
                   {t.phase === "overtime" ? mmss(t.overtime) : "—"}
                 </td>
+                <td>
+                  <Button variant="alert" onClick={() => onEndBreak?.(r.id)} style={{ padding: "6px 10px", fontSize: 12 }}>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}><Square size={13} /> End</span>
+                  </Button>
+                </td>
               </tr>
             );
           })}
@@ -918,7 +961,7 @@ function ActiveBreaksTable({ requests, now, style }) {
   );
 }
 
-function AdminEmployees({ employees, requests, now }) {
+function AdminEmployees({ employees, requests, now, onRoleChange, onDelete }) {
   const emps = employees.filter((e) => e.role !== "admin");
   return (
     <div>
@@ -927,12 +970,12 @@ function AdminEmployees({ employees, requests, now }) {
         <table>
           <thead>
             <tr style={{ borderBottom: `1px solid ${C.border}`, color: C.textMuted }}>
-              <th>Name</th><th>Account created</th><th>Current status</th>
+              <th>Name</th><th>Role</th><th>Account created</th><th>Current status</th><th>Actions</th>
             </tr>
           </thead>
           <tbody>
             {emps.length === 0 && (
-              <tr><td colSpan={3} style={{ color: C.textFaint, padding: 18 }}>No employee accounts yet.</td></tr>
+              <tr><td colSpan={5} style={{ color: C.textFaint, padding: 18 }}>No employee accounts yet.</td></tr>
             )}
             {emps.map((e) => {
               const active = requests.find((r) => r.employeeId === e.id && (r.status === "waiting" || r.status === "approved"));
@@ -944,8 +987,23 @@ function AdminEmployees({ employees, requests, now }) {
               return (
                 <tr key={e.id} style={{ borderBottom: `1px solid ${C.borderSoft}` }}>
                   <td style={{ fontWeight: 600 }}>{e.name}</td>
+                  <td><Badge tone={e.role === "supervisor" ? "accent" : "muted"}>{e.role === "supervisor" ? "Supervisor" : "Employee"}</Badge></td>
                   <td style={{ color: C.textMuted }}>{new Date(e.createdAt).toLocaleDateString()}</td>
                   <td><Badge tone={tone}>{label}</Badge></td>
+                  <td>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      <Button
+                        variant="subtle"
+                        onClick={() => onRoleChange(e.id, e.role === "supervisor" ? "employee" : "supervisor")}
+                        style={{ padding: "6px 9px", fontSize: 11.5 }}
+                      >
+                        {e.role === "supervisor" ? "Remove supervisor" : "Make supervisor"}
+                      </Button>
+                      <Button variant="alert" onClick={() => onDelete(e.id)} style={{ padding: "6px 9px", fontSize: 11.5 }}>
+                        Delete
+                      </Button>
+                    </div>
+                  </td>
                 </tr>
               );
             })}
