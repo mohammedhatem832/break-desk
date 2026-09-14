@@ -35,6 +35,7 @@ const FONT_MONO = "'JetBrains Mono', 'SF Mono', Consolas, monospace";
 // ---------------------------------------------------------------------------
 const EMP_KEY = "ebms:employees";
 const REQ_KEY = "ebms:requests";
+const SESSION_KEY = "ebms:session";
 
 // NOTE: This app was originally built against Claude.ai's artifact-only
 // `window.storage` API, which does not exist outside claude.ai. These
@@ -236,6 +237,16 @@ export default function BreakManagementApp() {
       const reqs = await loadShared(REQ_KEY, []);
       setEmployees(emps);
       setRequests(reqs);
+      const savedSession = await loadShared(SESSION_KEY, null);
+      if (savedSession?.id) {
+        const savedEmployee = emps.find((emp) => emp.id === savedSession.id);
+        if (savedEmployee) {
+          setCurrentUser({ id: savedEmployee.id, name: savedEmployee.name, role: savedEmployee.role });
+          setView(savedEmployee.role === "admin" ? "overview" : "dashboard");
+        } else {
+          await saveShared(SESSION_KEY, null);
+        }
+      }
       setReady(true);
     })();
   }, []);
@@ -285,7 +296,9 @@ export default function BreakManagementApp() {
     const emp = { id: uid("emp"), name, passwordHash, role: "employee", createdAt: Date.now() };
     const next = [...employees, emp];
     await persistEmployees(next);
-    setCurrentUser({ id: emp.id, name: emp.name, role: "employee" });
+    const session = { id: emp.id, name: emp.name, role: "employee" };
+    await saveShared(SESSION_KEY, session);
+    setCurrentUser(session);
     setView("dashboard");
   }
 
@@ -295,11 +308,14 @@ export default function BreakManagementApp() {
     if (!emp) { setAuthError("No account found with that name."); return; }
     const hash = await hashPassword(password);
     if (hash !== emp.passwordHash) { setAuthError("Incorrect password."); return; }
-    setCurrentUser({ id: emp.id, name: emp.name, role: emp.role });
+    const session = { id: emp.id, name: emp.name, role: emp.role };
+    await saveShared(SESSION_KEY, session);
+    setCurrentUser(session);
     setView(emp.role === "admin" ? "overview" : "dashboard");
   }
 
-  function handleLogout() {
+  async function handleLogout() {
+    await saveShared(SESSION_KEY, null);
     setCurrentUser(null);
     setAuthMode("login");
   }
